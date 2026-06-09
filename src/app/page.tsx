@@ -7,11 +7,9 @@ import type {
   ActionMenu,
   CombatPreview,
   CommanderId,
-  Funds,
   Point,
   Screen,
   Side,
-  Terrain,
   Tile,
   TurnSnapshot,
   Unit,
@@ -19,512 +17,34 @@ import type {
   UnitType,
 } from "../game/types";
 import {
-  AIR_REPAIR_TERRAINS,
-  CAPTURABLE_TERRAINS,
-  CAPTURE_POINTS,
-  CAPTURING_UNIT_TYPES,
   COMMANDER_IDS,
   DIRECTIONS,
-  GROUND_REPAIR_TERRAINS,
   H,
-  INCOME_PER_PROPERTY,
-  INCOME_TERRAINS,
   MAX_HP,
-  PRODUCTION_TERRAINS,
-  REPAIR_COST_PER_HP_RATE,
-  REPAIR_HP_PER_TURN,
   TILE,
-  UNIT_TYPES,
   W,
 } from "../game/constants";
 import { commanders } from "../game/data/commanders";
 import { makeMap } from "../game/data/map";
 import { terrainDefs } from "../game/data/terrain";
 import { unitDefs } from "../game/data/units";
+import { ArrowOverlay } from "../game/components/ArrowOverlay";
+import { CharacterSelect } from "../game/components/CharacterSelect";
+import { HomeScreen } from "../game/components/HomeScreen";
+import { TileArt } from "../game/components/TileArt";
+import { UnitArt } from "../game/components/UnitArt";
+import { UnitSprite } from "../game/components/UnitSprite";
+import { canCapture, dist, isCapturableTerrain, isProductionTerrain, key, sideLabel, unitAt } from "../game/rules/common";
+import { buildOptionsForTile, canProduceUnit } from "../game/rules/production";
+import { canEndMovementOn, effectiveMove, pathMoveCost, pathTo, reachable } from "../game/rules/movement";
+import { damagePercent } from "../game/rules/combat";
+import { createFreshGameState, propertyIncome, startingFunds } from "../game/rules/economy";
+import { repairSummary, repairUnitsForTurn } from "../game/rules/repair";
+import { resolveCapture } from "../game/rules/capture";
 
-function isCapturableTerrain(type: Terrain) { return CAPTURABLE_TERRAINS.has(type); }
-function isIncomeTerrain(type: Terrain) { return INCOME_TERRAINS.has(type); }
-function isProductionTerrain(type: Terrain) { return PRODUCTION_TERRAINS.has(type); }
-function canCapture(unit: Unit) { return CAPTURING_UNIT_TYPES.has(unit.type); }
-function isFlying(unit: Unit) { return unit.type === "copter"; }
-function sideLabel(side: Side) { return side === "player" ? "Blue" : "Red"; }
-function unitAt(units: Unit[], point: Point) { return units.find(u => u.x === point.x && u.y === point.y); }
 
-function buildOptionsForTile(tile: Tile): UnitType[] {
-  return tile.type === "airport" ? ["copter"] : UNIT_TYPES.filter(type => type !== "copter");
-}
-function canProduceUnit(tile: Tile, type: UnitType) {
-  return tile.type === "airport" ? type === "copter" : tile.type === "factory" && type !== "copter";
-}
+// Rule helpers live in game/rules. This file now focuses on state, actions, AI, and rendering.
 
-function key(x: number, y: number) { return `${x},${y}`; }
-function dist(a: Point, b: Point) { return Math.abs(a.x - b.x) + Math.abs(a.y - b.y); }
-function center(p: Point) { return { x: p.x * TILE + TILE / 2, y: p.y * TILE + TILE / 2 }; }
-
-function effectiveMove(unit: Unit) {
-  const darkLordMechBonus = unit.commander === "nova" && unit.type === "mech" ? 1 : 0;
-  return unitDefs[unit.type].move + darkLordMechBonus;
-}
-
-function attackPassiveMultiplier(unit: Unit) {
-  if (unit.commander === "nova") {
-    if (unit.type === "infantry") return 1.2;
-    if (unit.type !== "mech") return 0.9;
-  }
-
-  if (unit.commander === "ember" && unit.type === "copter") return 1.1;
-
-  return 1;
-}
-
-function damageTakenPassiveMultiplier(unit: Unit) {
-  return unit.commander === "frost" && unit.type === "tank" ? 0.9 : 1;
-}
-
-function isBlockedByEnemy(unit: Unit, point: Point, units: Unit[]) {
-  const occupyingUnit = unitAt(units, point);
-  return !!occupyingUnit && occupyingUnit.id !== unit.id && occupyingUnit.side !== unit.side;
-}
-
-function canEndMovementOn(unit: Unit, point: Point, units: Unit[]) {
-  const occupyingUnit = unitAt(units, point);
-  return !occupyingUnit || occupyingUnit.id === unit.id;
-}
-
-function moveCost(unit: Unit, tile: Tile) {
-  if (isFlying(unit)) return 1;
-  if (tile.type === "river") return 99;
-
-  switch (unit.type) {
-    case "infantry":
-      return tile.type === "mountain" ? 2 : 1;
-    case "mech":
-      return tile.type === "mountain" ? 1 : 1;
-    case "recon":
-      if (tile.type === "mountain") return 99;
-      if (tile.type === "plain") return 2;
-      if (tile.type === "forest") return 3;
-      return 1;
-    case "tank":
-    case "antiAir":
-      if (tile.type === "mountain") return 99;
-      return tile.type === "forest" ? 2 : 1;
-    default:
-      return terrainDefs[tile.type].move;
-  }
-}
-
-function defenderTerrainDefense(unit: Unit, tiles: Map<string, Tile>) {
-  return isFlying(unit) ? 0 : terrainDefs[tiles.get(key(unit.x, unit.y))!.type].defense;
-}
-
-const matchupDamage: Record<UnitType, Record<UnitType, number>> = {
-  infantry: { infantry: 55, mech: 45, recon: 12, tank: 5, antiAir: 5, copter: 7 },
-  mech: { infantry: 65, mech: 55, recon: 85, tank: 55, antiAir: 65, copter: 9 },
-  recon: { infantry: 70, mech: 65, recon: 35, tank: 6, antiAir: 4, copter: 10 },
-  tank: { infantry: 75, mech: 70, recon: 85, tank: 55, antiAir: 65, copter: 10 },
-  antiAir: { infantry: 105, mech: 105, recon: 60, tank: 25, antiAir: 45, copter: 120 },
-  copter: { infantry: 75, mech: 75, recon: 55, tank: 55, antiAir: 25, copter: 65 },
-};
-
-function baseDamage(attacker: Unit, defender: Unit) {
-  return matchupDamage[attacker.type][defender.type];
-}
-
-// --- Movement and pathfinding ---
-function reachable(unit: Unit, units: Unit[], tiles: Map<string, Tile>) {
-  const best = new Map<string, number>();
-  const q = [{ x: unit.x, y: unit.y, left: effectiveMove(unit) }];
-  best.set(key(unit.x, unit.y), effectiveMove(unit));
-
-  while (q.length) {
-    const cur = q.shift()!;
-    for (const [dx, dy] of DIRECTIONS) {
-      const nx = cur.x + dx, ny = cur.y + dy;
-      const nextPoint = { x: nx, y: ny };
-      if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
-
-      const tile = tiles.get(key(nx, ny))!;
-      const cost = moveCost(unit, tile);
-
-      // Enemy units are walls. Friendly units can be crossed, but cannot be the final landing spot.
-      if (cost > cur.left || isBlockedByEnemy(unit, nextPoint, units)) continue;
-
-      const left = cur.left - cost;
-      if (!best.has(key(nx, ny)) || best.get(key(nx, ny))! < left) {
-        best.set(key(nx, ny), left);
-        q.push({ x: nx, y: ny, left });
-      }
-    }
-  }
-
-  return best;
-}
-
-function pathTo(start: Point, target: Point, reach: Map<string, number>) {
-  if (!reach.has(key(target.x, target.y))) return [];
-  const path: Point[] = [target];
-  let cur = target;
-  while (!(cur.x === start.x && cur.y === start.y)) {
-    const neighbors = DIRECTIONS
-      .map(([dx, dy]) => ({ x: cur.x + dx, y: cur.y + dy }))
-      .filter(p => reach.has(key(p.x, p.y)));
-    const currentLeft = reach.get(key(cur.x, cur.y)) ?? -1;
-    const next = neighbors.sort((a, b) => {
-      const scoreA = (reach.get(key(a.x, a.y)) ?? -1) - currentLeft - dist(a, start) * 0.01;
-      const scoreB = (reach.get(key(b.x, b.y)) ?? -1) - currentLeft - dist(b, start) * 0.01;
-      return scoreB - scoreA;
-    })[0];
-    if (!next || path.some(p => p.x === next.x && p.y === next.y)) break;
-    cur = next;
-    path.unshift(cur);
-  }
-  return path;
-}
-
-function pathMoveCost(path: Point[], tiles: Map<string, Tile>, unit?: Unit) {
-  return path.slice(1).reduce((total, point) => {
-    const tile = tiles.get(key(point.x, point.y));
-    return total + (tile ? (unit ? moveCost(unit, tile) : terrainDefs[tile.type].move) : 99);
-  }, 0);
-}
-
-// --- Combat, economy, and repairs ---
-function damagePercent(attacker: Unit, defender: Unit, tiles: Map<string, Tile>) {
-  const base = baseDamage(attacker, defender);
-  const attackerHpScale = Math.max(0.1, attacker.hp / MAX_HP);
-  const terrain = defenderTerrainDefense(defender, tiles);
-  const terrainReduction = terrain * defender.hp;
-  const scaledDamage = base * attackerHpScale * attackPassiveMultiplier(attacker);
-  const damageAfterTerrain = scaledDamage - terrainReduction;
-  const damageAfterPassiveDefense = damageAfterTerrain * damageTakenPassiveMultiplier(defender);
-  return Math.max(1, Math.min(120, Math.round(damageAfterPassiveDefense)));
-}
-
-function propertyIncome(tiles: Map<string, Tile>, side: Side) {
-  return [...tiles.values()].filter(t => t.owner === side && isIncomeTerrain(t.type)).length * INCOME_PER_PROPERTY;
-}
-
-function startingFunds(tiles: Map<string, Tile>): Funds {
-  return {
-    player: propertyIncome(tiles, "player"),
-    ai: propertyIncome(tiles, "ai"),
-  };
-}
-
-function createFreshGameState() {
-  const tiles = makeMap();
-  return {
-    tiles,
-    units: [] as Unit[],
-    turn: "player" as Side,
-    day: 1,
-    funds: startingFunds(tiles),
-  };
-}
-
-function canRepairOnTile(unit: Unit, tile: Tile) {
-  if (tile.owner !== unit.side) return false;
-  return (isFlying(unit) ? AIR_REPAIR_TERRAINS : GROUND_REPAIR_TERRAINS).has(tile.type);
-}
-
-function repairUnitsForTurn(units: Unit[], tiles: Map<string, Tile>, funds: number, side: Side) {
-  let remainingFunds = funds;
-  let totalHealed = 0;
-  let totalCost = 0;
-
-  const repairedUnits = units.map(unit => {
-    if (unit.side !== side || unit.hp >= MAX_HP) return unit;
-
-    const tile = tiles.get(key(unit.x, unit.y));
-    if (!tile || !canRepairOnTile(unit, tile)) return unit;
-
-    const maxHeal = Math.min(REPAIR_HP_PER_TURN, MAX_HP - unit.hp);
-    const costPerHp = Math.round(unitDefs[unit.type].cost * REPAIR_COST_PER_HP_RATE);
-    const affordableHeal = Math.min(maxHeal, Math.floor(remainingFunds / costPerHp));
-
-    if (affordableHeal <= 0) return unit;
-
-    const repairCost = affordableHeal * costPerHp;
-    remainingFunds -= repairCost;
-    totalHealed += affordableHeal;
-    totalCost += repairCost;
-
-    return {
-      ...unit,
-      hp: unit.hp + affordableHeal,
-    };
-  });
-
-  return {
-    units: repairedUnits,
-    funds: remainingFunds,
-    totalHealed,
-    totalCost,
-  };
-}
-
-function repairSummary(side: Side, totalHealed: number, totalCost: number) {
-  if (totalHealed <= 0) return "";
-  return `${sideLabel(side)} repaired ${totalHealed * (100 / MAX_HP)}% HP for ${totalCost}G.`;
-}
-
-// --- Visual components ---
-function UnitArt({ type, commander, moving = false }: { type: UnitType; commander: CommanderId; moving?: boolean }) {
-  const art = commanders[commander].units[type];
-  const isUrl = art.startsWith("http");
-  const gifScale: Record<UnitType, number> = {
-    infantry: 0.82,
-    mech: 0.9,
-    recon: 0.98,
-    tank: 1.08,
-    antiAir: 1.02,
-    copter: 1.05,
-  };
-  if (isUrl) {
-    return (
-      <span className="flex h-[58px] w-[58px] items-center justify-center overflow-visible relative">
-        <img
-          src={/\/render\/[^/]+$/.test(art) ? art : `${art}/${moving ? "move" : "stand"}`}
-          alt={unitDefs[type].name}
-          className="h-14 w-14 object-contain drop-shadow-[0_0_10px_rgba(255,255,255,.35)] drop-shadow-[0_5px_0_rgba(0,0,0,.45)]"
-          style={{ transform: `scale(${gifScale[type]})`, transformOrigin: "center bottom" }}
-        />
-      </span>
-    );
-  }
-  return <span className="flex h-14 w-14 items-center justify-center text-3xl drop-shadow">{art}</span>;
-}
-
-function HpNumber({ value }: { value: number }) {
-  const ratio = Math.max(0, Math.min(1, value / MAX_HP));
-
-  const red = Math.round(255);
-  const green = Math.round(40 + ratio * 120);
-  const blue = Math.round(20);
-
-  const hpColor = `rgb(${red}, ${green}, ${blue})`;
-
-  return (
-    <span
-      className="hp-number"
-      style={{ color: hpColor }}
-    >
-      {value}
-    </span>
-  );
-}
-
-function UnitSprite({ unit, selected, commander, turn, moving = false, captureLeft }: { unit: Unit; selected: boolean; commander: CommanderId; turn: Side; moving?: boolean; captureLeft?: number }) {
-  const isExhausted = unit.acted && unit.side === turn;
-  return (
-    <motion.div
-      layout={false}
-      initial={false}
-      animate={{ x: unit.x * TILE, y: unit.y * TILE }}
-      transition={{ type: "tween", duration: 0.22, ease: "easeInOut" }}
-      className={`pointer-events-none absolute left-0 top-0 z-30 flex items-center justify-center text-center ${selected ? "ring-4 ring-white" : ""}`}
-      style={{ width: TILE, height: TILE }}
-    >
-      <div className="relative flex h-full w-full items-center justify-center">
-        <div className={`unit-pop flex h-[58px] w-[58px] items-center justify-center ${isExhausted ? "unit-exhausted" : ""}`}>
-          <UnitArt type={unit.type} commander={commander} moving={moving} />
-        </div>
-
-        <div className="absolute bottom-0 right-0 translate-x-[5px] translate-y-[5px] z-40 pointer-events-none">
-          <HpNumber value={unit.hp} />
-        </div>
-
-        {unit.capturing ? (
-          <div
-            title={`Capturing: ${CAPTURE_POINTS - (captureLeft ?? CAPTURE_POINTS)}/${CAPTURE_POINTS} complete`}
-            className="absolute -right-1 top-6 z-40 flex items-center gap-1 rounded-full bg-yellow-300 px-1.5 py-[2px] text-[10px] font-black text-slate-950 shadow-lg"
-          >
-            <span>🚩</span>
-            <span>{CAPTURE_POINTS - (captureLeft ?? CAPTURE_POINTS)}/{CAPTURE_POINTS}</span>
-          </div>
-        ) : null}
-      </div>
-    </motion.div>
-  );
-}
-
-function ArrowOverlay({ path }: { path: Point[] }) {
-  if (path.length < 2) return null;
-
-  const points = path.map(center);
-  const polyline = points.map(p => `${p.x},${p.y}`).join(" ");
-  const last = points[points.length - 1];
-  const prev = points[points.length - 2];
-
-  const dx = last.x - prev.x;
-  const dy = last.y - prev.y;
-  const length = Math.max(1, Math.sqrt(dx * dx + dy * dy));
-  const ux = dx / length;
-  const uy = dy / length;
-  const px = -uy;
-  const py = ux;
-
-  const tip = { x: last.x + ux * 18, y: last.y + uy * 18 };
-  const base = { x: last.x - ux * 10, y: last.y - uy * 10 };
-  const left = { x: base.x + px * 17, y: base.y + py * 17 };
-  const right = { x: base.x - px * 17, y: base.y - py * 17 };
-  const innerBase = { x: last.x - ux * 5, y: last.y - uy * 5 };
-  const innerLeft = { x: innerBase.x + px * 11, y: innerBase.y + py * 11 };
-  const innerRight = { x: innerBase.x - px * 11, y: innerBase.y - py * 11 };
-
-  const outerHead = `${tip.x},${tip.y} ${left.x},${left.y} ${right.x},${right.y}`;
-  const innerTip = { x: last.x + ux * 12, y: last.y + uy * 12 };
-  const innerHead = `${innerTip.x},${innerTip.y} ${innerLeft.x},${innerLeft.y} ${innerRight.x},${innerRight.y}`;
-
-  return (
-    <svg className="pointer-events-none absolute inset-0 z-40" width={W * TILE} height={H * TILE}>
-      <motion.polyline
-        points={polyline}
-        fill="none"
-        stroke="rgba(255,255,255,.9)"
-        strokeWidth="18"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        initial={{ pathLength: 0 }}
-        animate={{ pathLength: 1 }}
-        transition={{ duration: 0.08 }}
-      />
-      <motion.polyline
-        points={polyline}
-        fill="none"
-        stroke="#ff3b00"
-        strokeWidth="12"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        initial={{ pathLength: 0 }}
-        animate={{ pathLength: 1 }}
-        transition={{ duration: 0.08 }}
-      />
-      <motion.polygon
-        points={outerHead}
-        fill="white"
-        stroke="rgba(0,0,0,.2)"
-        strokeWidth="1"
-        strokeLinejoin="round"
-        initial={{ opacity: 0, scale: 0.7 }}
-        animate={{ opacity: 1, scale: 1 }}
-        transition={{ duration: 0.08 }}
-      />
-      <motion.polygon
-        points={innerHead}
-        fill="#ff3b00"
-        stroke="#ff9a7a"
-        strokeWidth="1"
-        strokeLinejoin="round"
-        initial={{ opacity: 0, scale: 0.7 }}
-        animate={{ opacity: 1, scale: 1 }}
-        transition={{ duration: 0.08 }}
-      />
-    </svg>
-  );
-}
-
-function TileArt({ tile }: { tile: Tile }) {
-  const icon = terrainDefs[tile.type].icon;
-  return (
-    <>
-      {tile.type === "forest" && <><span className="absolute left-1 top-2 text-2xl">🌲</span><span className="absolute right-1 top-5 text-2xl">🌲</span><span className="absolute bottom-1 left-5 text-2xl">🌲</span></>}
-      {tile.type === "mountain" && <><span className="absolute left-2 top-2 text-3xl">⛰️</span><span className="absolute bottom-1 right-1 text-2xl">⛰️</span></>}
-      {tile.type === "road" && <><span className="absolute left-0 top-1/2 h-5 w-full -translate-y-1/2 bg-slate-300" /><span className="absolute left-1/2 top-1/2 h-1 w-8 -translate-x-1/2 -translate-y-1/2 bg-white/80" /></>}
-      {tile.type === "river" && <><span className="absolute inset-0 bg-[linear-gradient(135deg,rgba(255,255,255,.25)_25%,transparent_25%,transparent_50%,rgba(255,255,255,.25)_50%,rgba(255,255,255,.25)_75%,transparent_75%)] bg-[length:18px_18px]" /><span className="absolute inset-0 flex items-center justify-center text-2xl text-white/80">≈</span></>}
-      {tile.type === "bridge" && <><span className="absolute inset-0 bg-cyan-300" /><span className="absolute left-0 top-4 h-7 w-full bg-slate-300" /><span className="absolute left-0 top-[27px] h-1 w-full bg-white/80" /></>}
-      {tile.type === "airport" && (
-        <>
-          <span className="absolute left-[7px] top-[30px] h-[12px] w-[42px] -rotate-[24deg] rounded-[4px] bg-slate-700 shadow-[inset_0_0_0_1px_rgba(255,255,255,.08)]" />
-          <span className="absolute left-[18px] top-[31px] h-[2px] w-[5px] -rotate-[24deg] bg-white/90" />
-          <span className="absolute left-[25px] top-[34px] h-[2px] w-[5px] -rotate-[24deg] bg-white/90" />
-          <span className="absolute left-[32px] top-[37px] h-[2px] w-[5px] -rotate-[24deg] bg-white/90" />
-          <span className="absolute left-[7px] top-[10px] h-[16px] w-[16px] rounded-sm bg-slate-100 shadow-[0_2px_0_rgba(0,0,0,.25)]" />
-          <span className="absolute left-[11px] top-[4px] h-[8px] w-[8px] rounded-t-sm bg-slate-300 shadow-[0_1px_0_rgba(0,0,0,.2)]" />
-          <span className="absolute left-[9px] top-[15px] h-[2px] w-[10px] rounded-full bg-cyan-300/90" />
-          <span className="absolute right-[6px] top-[8px] text-[12px] drop-shadow">✈️</span>
-        </>
-      )}
-      {["city", "factory", "hq"].includes(tile.type) && <span className="absolute inset-0 flex items-center justify-center text-4xl drop-shadow">{icon}</span>}
-    </>
-  );
-}
-
-function HomeScreen({ onStart }: { onStart: () => void }) {
-  return (
-    <main className="flex min-h-screen items-center justify-center overflow-hidden bg-[radial-gradient(circle_at_top,#415f9f,#10172a_62%)] p-6 text-white">
-      <motion.section initial={{ opacity: 0, y: 30 }} animate={{ opacity: 1, y: 0 }} className="max-w-3xl rounded-[36px] border border-white/15 bg-slate-950/60 p-10 text-center shadow-2xl backdrop-blur">
-        <div className="mb-4 text-7xl">⚔️</div>
-        <h1 className="text-6xl font-black tracking-tight">Maple Wars</h1>
-        <p className="mx-auto mt-4 max-w-xl text-lg text-slate-300">A browser strategy prototype with commanders, factories, airports, grid movement, and tactical combat.</p>
-        <button onClick={onStart} className="mt-8 rounded-2xl bg-yellow-300 px-10 py-4 text-xl font-black text-slate-950 shadow-xl transition hover:scale-105">Single Player</button>
-      </motion.section>
-    </main>
-  );
-}
-
-function CommanderPortrait({ src, name }: { src: string; name: string }) {
-  if (src.startsWith("http")) {
-    return (
-      <img
-        src={src}
-        alt={name}
-        className="h-28 w-28 object-contain drop-shadow-[0_8px_0_rgba(0,0,0,.25)]"
-      />
-    );
-  }
-
-  return <span className="text-7xl">{src}</span>;
-}
-
-function CharacterSelect({ onPick }: { onPick: (id: CommanderId) => void }) {
-  return (
-    <main className="min-h-screen bg-[radial-gradient(circle_at_top,#334b7c,#10172a_62%)] p-6 text-white">
-      <section className="mx-auto max-w-6xl">
-        <div className="mb-8 text-center">
-          <h1 className="text-4xl font-black">Choose Your Commander</h1>
-          <p className="mt-2 text-slate-300">The AI will randomly choose one of the remaining commanders.</p>
-        </div>
-        <div className="grid gap-5 md:grid-cols-3">
-          {COMMANDER_IDS.map(id => {
-            const c = commanders[id];
-            return (
-              <motion.button key={id} whileHover={{ y: -8, scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={() => onPick(id)} className="overflow-hidden rounded-[28px] border border-white/15 bg-slate-950/70 text-left shadow-2xl">
-                <div className={`bg-gradient-to-br ${c.theme} p-6 text-center`}>
-                  <div className="mx-auto flex h-32 w-32 items-center justify-center rounded-full bg-white/30 shadow-inner"><CommanderPortrait src={c.portrait} name={c.name} /></div>
-                </div>
-                <div className="p-5">
-                  <h2 className="text-2xl font-black">{c.name}</h2>
-                  <p className="font-bold text-yellow-200">{c.title}</p>
-                  <p className="mt-3 text-sm text-slate-300">{c.description}</p>
-                  <div className="mt-3 rounded-2xl border border-yellow-200/30 bg-yellow-300/10 p-3 text-sm text-yellow-100">
-                    <span className="font-black">Passive:</span> {c.passive}
-                  </div>
-                  <div className="mt-4 rounded-2xl bg-white/10 p-3">
-                    <div className="mb-3 text-xs font-black uppercase tracking-wide text-slate-400">Available Units</div>
-                    <div className="grid grid-cols-2 gap-3">
-                      {UNIT_TYPES.map(type => (
-                        <div key={type} className="flex min-h-[92px] flex-col items-center justify-between rounded-2xl bg-slate-900/70 p-2 text-center ring-1 ring-white/10">
-                          <span className="flex h-14 w-16 items-center justify-center rounded-xl bg-white/10">
-                            <UnitArt type={type} commander={id} />
-                          </span>
-                          <span className="mt-1 text-[11px] font-black leading-tight text-slate-100">{unitDefs[type].name}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              </motion.button>
-            );
-          })}
-        </div>
-      </section>
-    </main>
-  );
-}
-
-// --- Main game component ---
 export default function Page() {
   const [screen, setScreen] = useState<Screen>("home");
   const [playerCommander, setPlayerCommander] = useState<CommanderId>("nova");
@@ -609,29 +129,13 @@ export default function Page() {
 
   function captureIfPossible(moved: Unit, nextTiles: Map<string, Tile>) {
     const tile = nextTiles.get(key(moved.x, moved.y))!;
-    if (!isCapturableTerrain(tile.type)) return false;
-    if (!canCapture(moved)) return false;
-    if (tile.owner === moved.side) return false;
+    const result = resolveCapture(moved, tile);
 
-    const currentCapture = tile.capture ?? CAPTURE_POINTS;
-    const nextCapture = currentCapture - moved.hp;
+    if (!result) return false;
 
-    if (nextCapture <= 0) {
-      nextTiles.set(key(moved.x, moved.y), {
-        ...tile,
-        owner: moved.side,
-        capture: CAPTURE_POINTS,
-      });
-      setMessage(`${sideLabel(moved.side)} captured a ${terrainDefs[tile.type].name}.`);
-      return false;
-    }
-
-    nextTiles.set(key(moved.x, moved.y), {
-      ...tile,
-      capture: nextCapture,
-    });
-    setMessage(`${terrainDefs[tile.type].name} capture progress: ${CAPTURE_POINTS - nextCapture}/${CAPTURE_POINTS}.`);
-    return true;
+    nextTiles.set(key(moved.x, moved.y), result.tile);
+    setMessage(result.message);
+    return result.stillCapturing;
   }
 
   function getAdjacentMoveTarget(attacker: Unit, enemy: Unit) {
