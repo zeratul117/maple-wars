@@ -1,9 +1,9 @@
 import type { CommanderId, Terrain, UnitType } from "./types";
 
 // Core board constants.
-export const W = 16;
+export const W = 19;
 export const H = 16;
-export const TILE = 56;
+export const TILE = 48;
 
 // Shared lists used by UI and rules.
 export const COMMANDER_IDS: CommanderId[] = ["nova", "ember", "frost"];

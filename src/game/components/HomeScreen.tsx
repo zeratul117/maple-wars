@@ -13,7 +13,7 @@ export function HomeScreen({ onStart }: { onStart: () => void }) {
         <div className="mb-4 text-7xl">⚔️</div>
         <h1 className="text-6xl font-black tracking-tight">Maple Wars</h1>
         <p className="mx-auto mt-4 max-w-xl text-lg text-slate-300">
-          Basically, Advance Wars with MapleStory assets to make it cuter!
+          A browser strategy prototype with commanders, factories, airports, grid movement, and tactical combat.
         </p>
         <button
           onClick={onStart}

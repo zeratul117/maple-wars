@@ -10,7 +10,8 @@ export type Terrain =
   | "city"
   | "factory"
   | "airport"
-  | "hq";
+  | "hq"
+  | "wall";
 
 export type UnitType = "infantry" | "mech" | "recon" | "tank" | "antiAir" | "copter";
 export type CommanderId = "nova" | "ember" | "frost";

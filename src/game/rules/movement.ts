@@ -20,6 +20,9 @@ export function canEndMovementOn(unit: Unit, point: Point, units: Unit[]) {
 }
 
 export function moveCost(unit: Unit, tile: Tile) {
+  //No one can move over walls
+  if (tile.type === "wall") return 99;
+
   if (isFlying(unit)) return 1;
   if (tile.type === "river") return 99;
 
