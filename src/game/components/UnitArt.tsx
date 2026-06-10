@@ -1,4 +1,4 @@
-import type { CommanderId, UnitType } from "../types";
+import type { CommanderId, UnitType, CommanderDefinition } from "../types";
 import { commanders } from "../data/commanders";
 import { unitDefs } from "../data/units";
 
@@ -13,6 +13,19 @@ export function UnitArt({
 }) {
   const art = commanders[commander].units[type];
   const isUrl = art.startsWith("http");
+  const commanderObject = commanders[commander];
+
+  function setUnitStyle(commanderProperty: CommanderDefinition, type: UnitType) {
+    if (commanderProperty.name === "Balrog" ) {
+      if (type === "mech") {
+        return "-mt-3 h-13 object-contain";
+      }
+    }
+    if (type === "copter" && commanderProperty.name !== "Athena") {
+        return "h-20 w-20 object-contain";
+      }
+    return "h-10 w-14 object-contain";
+  }
 
   const gifScale: Record<UnitType, number> = {
     infantry: 0.82,
@@ -29,7 +42,7 @@ export function UnitArt({
         <img
           src={/\/render\/[^/]+$/.test(art) ? art : `${art}/${moving ? "move" : "stand"}`}
           alt={unitDefs[type].name}
-          className="h-14 w-14 object-contain drop-shadow-[0_0_10px_rgba(255,255,255,.35)] drop-shadow-[0_5px_0_rgba(0,0,0,.45)]"
+          className={setUnitStyle(commanderObject, type)}
           style={{ transform: `scale(${gifScale[type]})`, transformOrigin: "center bottom" }}
         />
       </span>

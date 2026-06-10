@@ -9,7 +9,14 @@ export const commanders: Record<CommanderId, CommanderDefinition> = {
     unitStyle: "Blue high-tech army",
     description: "Balanced army with clean movement and reliable armor.",
     passive: "Mechs have +1 movement. Infantry deal 20% more damage. Other units deal 10% less damage.",
-    units: { infantry: "https://maplestory.io/api/gms/62/mob/100100/render", mech: "https://maplestory.io/api/gms/62/mob/130101/render", recon: "https://maplestory.io/api/gms/62/mob/1210100/render", tank: "https://maplestory.io/api/gms/62/mob/4230400/render", antiAir: "https://maplestory.io/api/gms/62/mob/4230101/render", copter: "https://maplestory.io/api/gms/62/mob/3230303/render/fly" },
+    units: { 
+      infantry: "https://maplestory.io/api/gms/62/mob/100100/render", 
+      mech: "https://maplestory.io/api/gms/62/mob/130101/render", 
+      recon: "https://maplestory.io/api/gms/62/mob/1210100/render", 
+      tank: "https://maplestory.io/api/gms/62/mob/4230400/render", 
+      antiAir: "https://maplestory.io/api/gms/62/mob/4230101/render", 
+      copter: "https://maplestory.io/api/gms/62/mob/3230303/render/fly" 
+    },
   },
   ember: {
     name: "Athena",
@@ -36,6 +43,13 @@ export const commanders: Record<CommanderId, CommanderDefinition> = {
     unitStyle: "Ice tactical army",
     description: "Cool-toned army focused on defensive visuals.",
     passive: "Tanks take 10% less damage.",
-    units: { infantry: "https://maplestory.io/api/gms/62/mob/130100/render", mech: "https://maplestory.io/api/gms/62/mob/1130100/render", recon: "https://maplestory.io/api/gms/62/mob/3230101/render", tank: "https://maplestory.io/api/gms/62/mob/2230102/render", antiAir: "https://maplestory.io/api/gms/62/mob/3230400/render", copter: "https://maplestory.io/api/gms/62/mob/5300100/render/fly" },
+    units: { 
+      infantry: "https://maplestory.io/api/gms/62/mob/130100/render", 
+      mech: "https://maplestory.io/api/gms/62/mob/1130100/render", 
+      recon: "https://maplestory.io/api/gms/62/mob/3230101/render", 
+      tank: "https://maplestory.io/api/gms/62/mob/2230102/render", 
+      antiAir: "https://maplestory.io/api/gms/62/mob/3230400/render", 
+      copter: "https://maplestory.io/api/gms/62/mob/5300100/render/fly" 
+    },
   },
 };

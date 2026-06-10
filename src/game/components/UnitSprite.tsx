@@ -38,9 +38,9 @@ export function UnitSprite({
           <UnitArt type={unit.type} commander={commander} moving={moving} />
         </div>
 
-        <div className="pointer-events-none absolute bottom-0 right-0 z-40 translate-x-[5px] translate-y-[5px]">
-          <HpNumber value={unit.hp} />
-        </div>
+        <div className="pointer-events-none absolute bottom-0 right-0 z-40 translate-x-[5px] translate-y-[5px] scale-65">
+  <HpNumber value={unit.hp} />
+</div>
 
         {unit.capturing ? (
           <div
