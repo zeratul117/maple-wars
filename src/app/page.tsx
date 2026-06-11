@@ -182,12 +182,13 @@ export default function Page() {
     if (!selectedUnit || !canEndMovementOn(selectedUnit, target, units)) return;
 
     const finalPath = getPathForTarget(target);
-    const finalSpot = { ...selectedUnit, x: target.x, y: target.y, moved: false, acted: true };
+    const finalSpot = { ...selectedUnit, x: target.x, y: target.y, moved: false, acted: true, capturing: false, };
 
     const finishAction = () => {
       const nextTiles = new Map(tiles);
       const stillCapturing = doCapture ? captureIfPossible(finalSpot, nextTiles) : false;
       setTiles(nextTiles);
+      console.log(stillCapturing, "HEEY!");
       setUnits(prev => prev.map(u =>
         u.id === selectedUnit.id
           ? { ...finalSpot, capturing: stillCapturing }
@@ -251,7 +252,8 @@ export default function Page() {
       finalPath.slice(1).forEach((step, index) => {
         window.setTimeout(() => {
           const isLast = index === finalPath.length - 2;
-          setUnits(prev => prev.map(u => u.id === selectedUnit.id ? { ...u, x: step.x, y: step.y, moved: isLast, acted: false } : u));
+          setUnits(prev => prev.map(u => u.id === selectedUnit.id ? 
+            { ...u, x: step.x, y: step.y, moved: isLast, acted: false } : u));
           if (isLast) {
             setMovingUnitId(null);
             setSelectedUnitId(selectedUnit.id);
@@ -417,8 +419,9 @@ export default function Page() {
     setUnits(prev => {
       let next = prev.map(u => u.id === defender.id ? { ...u, hp: u.hp - Math.ceil(atk / MAX_HP) } : u).filter(u => u.hp > 0);
       const defenderAlive = next.some(u => u.id === defender.id);
-      if (defenderAlive && counter > 0) next = next.map(u => u.id === attacker.id ? { ...u, hp: u.hp - Math.ceil(counter / MAX_HP), acted: true, moved: false } : u).filter(u => u.hp > 0);
-      else next = next.map(u => u.id === attacker.id ? { ...u, acted: true, moved: false } : u);
+      if (defenderAlive && counter > 0) next = next.map(u => u.id === attacker.id ? 
+        { ...u, hp: u.hp - Math.ceil(counter / MAX_HP), acted: true, moved: false, capturing: false, } : u).filter(u => u.hp > 0);
+      else next = next.map(u => u.id === attacker.id ? { ...u, acted: true, moved: false, capturing: false, } : u);
       return next;
     });
     setMessage(`${unitDefs[attacker.type].name} dealt ${atk}% damage${counter ? ` and received ${counter}% counter damage` : ""}.`);
