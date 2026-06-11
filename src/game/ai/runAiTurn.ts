@@ -168,42 +168,98 @@ export async function runAiTurn({
       .filter(point => canEndMovementOn(unit, point, simUnits));
   };
 
+  const isHighValueProperty = (tile: Tile) => {
+    return tile.type === "hq" || tile.type === "factory" || tile.type === "airport";
+  };
+
   const propertyBaseValue = (tile: Tile) => {
-    if (tile.type === "hq") return tile.owner === "player" ? 16000 : 8000;
-    if (tile.type === "factory") return tile.owner === "player" ? 12000 : 10500;
-    if (tile.type === "airport") return tile.owner === "player" ? 10500 : 9500;
-    if (tile.type === "city") return tile.owner === "player" ? 4200 : 3600;
+    if (tile.type === "hq") return tile.owner === "player" ? 30000 : 16000;
+    if (tile.type === "factory") return tile.owner === "player" ? 22000 : 20000;
+    if (tile.type === "airport") return tile.owner === "player" ? 20500 : 18500;
+    if (tile.type === "city") return tile.owner === "player" ? 6500 : 5000;
     return 0;
   };
 
+  const propertyTargetReason = (tile: Tile) => {
+    if (tile.type === "hq") return "enemy HQ";
+    if (tile.type === "factory") return tile.owner === null ? "nearby neutral factory" : "enemy factory";
+    if (tile.type === "airport") return tile.owner === null ? "nearby neutral airport" : "enemy airport";
+    return tile.owner === null ? "neutral city" : "enemy city";
+  };
+
   const bestPropertyTargetFor = (unit: Unit, reservedTargets: Set<string>) => {
-    return [...simTiles.values()]
+    const candidates = [...simTiles.values()]
       .filter(tile => isCapturableTerrain(tile.type) && tile.owner !== "ai")
       .map(tile => {
         const travelTurns = turnsTo(unit, tile);
         const captureProgress = CAPTURE_POINTS_TOTAL - (tile.capture ?? CAPTURE_POINTS_TOTAL);
-        const reservationPenalty = reservedTargets.has(key(tile.x, tile.y)) ? 3200 : 0;
+        const reserved = reservedTargets.has(key(tile.x, tile.y));
 
-        // Strongly reward close factories/airports.
+        // Do not send multiple capturers to the same low-value target.
+        // High-value buildings can still receive backup if they are very important.
+        const reservationPenalty = reserved
+          ? isHighValueProperty(tile) ? 5500 : 12000
+          : 0;
+
         const closeBonus =
-          travelTurns <= 1 ? 6000 :
-          travelTurns <= 2 ? 3800 :
-          travelTurns <= 3 ? 2200 :
+          travelTurns <= 1 ? 12000 :
+          travelTurns <= 2 ? 9000 :
+          travelTurns <= 3 ? 6500 :
+          travelTurns <= 4 ? 3500 :
           0;
 
-        // This scoring is intentionally simple:
-        // nearby factory/airport > far enemy HQ > random city.
+        const highValueVicinityBonus =
+          isHighValueProperty(tile) && travelTurns <= 5 ? 9000 : 0;
+
+        const cityPenalty =
+          tile.type === "city" && [...simTiles.values()].some(other =>
+            isHighValueProperty(other) &&
+            other.owner !== "ai" &&
+            turnsTo(unit, other) <= Math.max(1, travelTurns + 2)
+          )
+            ? 4500
+            : 0;
+
         const score =
           propertyBaseValue(tile) +
           closeBonus +
-          captureProgress * 500 -
-          travelTurns * 1300 -
-          reservationPenalty;
+          highValueVicinityBonus +
+          captureProgress * 650 -
+          travelTurns * 1800 -
+          reservationPenalty -
+          cityPenalty;
 
         return { tile, score, travelTurns };
       })
-      .filter(option => Number.isFinite(option.travelTurns))
-      .sort((a, b) => b.score - a.score)[0]?.tile ?? null;
+      .filter(option => Number.isFinite(option.travelTurns));
+
+    // Hard rule: if a factory or airport is nearby, capture that before random cities.
+    const nearbyProduction = candidates
+      .filter(option => (option.tile.type === "factory" || option.tile.type === "airport") && option.travelTurns <= 5)
+      .sort((a, b) =>
+        b.score - a.score ||
+        a.travelTurns - b.travelTurns
+      )[0];
+
+    if (nearbyProduction) return nearbyProduction.tile;
+
+    return candidates
+      .sort((a, b) =>
+        b.score - a.score ||
+        a.travelTurns - b.travelTurns
+      )[0]?.tile ?? null;
+  };
+
+  const shouldCaptureLandedTile = (unit: Unit, landedTile: Tile, intendedTarget: Tile) => {
+    if (!isCapturableTerrain(landedTile.type) || landedTile.owner === "ai") return false;
+    if (key(landedTile.x, landedTile.y) === key(intendedTarget.x, intendedTarget.y)) return true;
+    if (isHighValueProperty(landedTile)) return true;
+
+    // If the unit is moving toward a factory, airport, or HQ, do not get distracted
+    // by a random city on the way.
+    if (isHighValueProperty(intendedTarget)) return false;
+
+    return true;
   };
 
   const canBeKilledNextTurn = (unit: Unit, point: Point) => {
@@ -218,17 +274,30 @@ export async function runAiTurn({
   };
 
   const bestMoveToward = (unit: Unit, target: Point, avoidDeath = false) => {
+    const currentRemainingCost = strategicPathCost(unit, unit, target);
+
     return reachableMovePoints(unit)
       .map(point => {
         const remainingCost = strategicPathCost(unit, point, target);
         const tile = tileAt(point);
         const deathPenalty = avoidDeath && canBeKilledNextTurn(unit, point) ? 50000 : 0;
-        const defenseBonus = tile ? terrainDefs[tile.type].defense * 25 : 0;
-        const stayPenalty = point.x === unit.x && point.y === unit.y ? 100 : 0;
+        const defenseBonus = tile ? terrainDefs[tile.type].defense * (canCapture(unit) ? 4 : 20) : 0;
+        const stayPenalty = point.x === unit.x && point.y === unit.y ? 250 : 0;
+
+        // Capture units should not climb onto mountains just because the defense is good.
+        // They should mainly move closer to the chosen property.
+        const captureMountainPenalty = canCapture(unit) && tile?.type === "mountain" ? 350 : 0;
+        const noProgressPenalty = remainingCost >= currentRemainingCost ? 1200 : 0;
 
         return {
           point,
-          score: remainingCost + deathPenalty + stayPenalty - defenseBonus,
+          score:
+            remainingCost +
+            deathPenalty +
+            stayPenalty +
+            captureMountainPenalty +
+            noProgressPenalty -
+            defenseBonus,
         };
       })
       .filter(option => Number.isFinite(option.score))
@@ -262,14 +331,46 @@ export async function runAiTurn({
     };
   };
 
+  const isCaptureInterruptTarget = (enemy: Unit) => {
+    if (enemy.capturing) return true;
+
+    const enemyTile = tileAt(enemy);
+    if (!enemyTile || !isCapturableTerrain(enemyTile.type)) return false;
+
+    // A player infantry/mech sitting on an AI factory, airport, or HQ is a major problem,
+    // even before the capture flag is visible.
+    return enemyTile.owner === "ai" && isHighValueProperty(enemyTile) && canCapture(enemy);
+  };
+
+  const attackPriority = (attacker: Unit, result: AttackResult) => {
+    const enemyTile = tileAt(result.enemy);
+    const interruptBonus = isCaptureInterruptTarget(result.enemy) ? 9000 : 0;
+    const highValueTileBonus =
+      enemyTile && isCapturableTerrain(enemyTile.type) && isHighValueProperty(enemyTile)
+        ? 2500
+        : 0;
+    const footSoldierBonus =
+      canCapture(attacker) && (result.enemy.type === "infantry" || result.enemy.type === "mech")
+        ? 1200
+        : 0;
+
+    return result.score + interruptBonus + highValueTileBonus + footSoldierBonus;
+  };
+
   const isGoodAttack = (unit: Unit, result: AttackResult) => {
     if (result.attackerHpAfterCounter <= 0) return false;
     if (result.kills) return true;
 
-    // Foot units are for capture first. They only attack if it is a clearly good trade.
-    if (canCapture(unit)) return result.score >= unitDefs[unit.type].cost * 0.6;
+    const priority = attackPriority(unit, result);
 
-    return result.score >= 250 || result.atk >= result.counter + 15;
+    // Infantry and Mechs should still capture, but they must also fight when they can
+    // interrupt captures or make a reasonable trade.
+    if (canCapture(unit)) {
+      if (isCaptureInterruptTarget(result.enemy) && result.atk >= 10) return true;
+      return priority >= 900 || (result.atk >= 20 && result.atk >= result.counter - 20);
+    }
+
+    return priority >= 250 || result.atk >= result.counter + 15;
   };
 
   const bestCurrentAttack = (unit: Unit) => {
@@ -277,11 +378,11 @@ export async function runAiTurn({
       .filter(enemy => dist(unit, enemy) <= unitDefs[unit.type].range)
       .map(enemy => attackResult(unit, enemy))
       .filter(result => isGoodAttack(unit, result))
-      .sort((a, b) => b.score - a.score)[0] ?? null;
+      .sort((a, b) => attackPriority(unit, b) - attackPriority(unit, a))[0] ?? null;
   };
 
   const bestAttackAfterMove = (unit: Unit) => {
-    let best: { point: Point; result: AttackResult } | null = null;
+    let best: { point: Point; result: AttackResult; priority: number } | null = null;
 
     for (const point of reachableMovePoints(unit)) {
       const virtualAttacker = { ...unit, x: point.x, y: point.y };
@@ -290,10 +391,13 @@ export async function runAiTurn({
         if (dist(virtualAttacker, enemy) > unitDefs[unit.type].range) continue;
 
         const result = attackResult(virtualAttacker, enemy);
-        if (!isGoodAttack(unit, result)) continue;
+        if (!isGoodAttack(virtualAttacker, result)) continue;
 
-        if (!best || result.score > best.result.score) {
-          best = { point, result };
+        const movePenalty = point.x === unit.x && point.y === unit.y ? 0 : 100;
+        const priority = attackPriority(virtualAttacker, result) - movePenalty;
+
+        if (!best || priority > best.priority) {
+          best = { point, result, priority };
         }
       }
     }
@@ -410,7 +514,14 @@ export async function runAiTurn({
   // enough capture units to expand, but then spend on tanks/recons/anti-air/copiers instead of stacking cash.
   const openProperties = [...simTiles.values()].filter(tile => isCapturableTerrain(tile.type) && tile.owner !== "ai");
   const openFactoriesOrAirports = openProperties.filter(tile => tile.type === "factory" || tile.type === "airport");
-  const desiredCapturers = Math.min(8, Math.max(4, Math.ceil(openProperties.length / 5)));
+  const nearbyOpenFactoriesOrAirports = openFactoriesOrAirports.filter(tile =>
+    aiCapturers().some(unit => turnsTo(unit, tile) <= 6) ||
+    aiProperties().some(property => dist(property, tile) <= 8)
+  );
+  const desiredCapturers = Math.min(
+    6,
+    Math.max(3, nearbyOpenFactoriesOrAirports.length + Math.ceil(openProperties.length / 10))
+  );
   const aiIncomeCount = aiProperties().length;
   const totalAiCombat = aiCombatUnits().length;
   const playerCopterCount = playerUnits().filter(unit => unit.type === "copter").length;
@@ -422,7 +533,7 @@ export async function runAiTurn({
     const copterThreat = threatNear(building, isAirThreat, 9);
     const groundThreat = threatNear(building, isGroundThreat, 8);
     const hasLotsOfMoney = simFunds.ai >= 10000;
-    const needsCapturePressure = capturers < desiredCapturers || openFactoriesOrAirports.length > 0;
+    const needsCapturePressure = capturers < desiredCapturers;
 
     if (building.type === "airport") {
       if (simFunds.ai >= unitDefs.copter.cost) {
@@ -461,7 +572,7 @@ export async function runAiTurn({
         score:
           900 +
           groundThreat * 500 +
-          (hasLotsOfMoney ? 800 : 0) +
+          (hasLotsOfMoney ? 1200 : 0) +
           (totalAiCombat < Math.ceil(aiCapturers().length / 2) ? 500 : 0) -
           countType("tank") * 150,
       });
@@ -590,34 +701,61 @@ export async function runAiTurn({
     }
 
     if (canCapture(current)) {
+      // Capture units are not helpless. They should interrupt player captures,
+      // kill nearby units, or take a good trade before walking to another property.
+      const currentAttack = bestCurrentAttack(current);
+      if (
+        currentAttack &&
+        (
+          isCaptureInterruptTarget(currentAttack.enemy) ||
+          currentAttack.kills ||
+          attackPriority(current, currentAttack) >= 1700
+        )
+      ) {
+        await performAttack(current, currentAttack);
+        continue;
+      }
+
+      const attackAfterMove = bestAttackAfterMove(current);
+      if (
+        attackAfterMove &&
+        (
+          isCaptureInterruptTarget(attackAfterMove.result.enemy) ||
+          attackAfterMove.result.kills ||
+          attackAfterMove.priority >= 2200
+        )
+      ) {
+        current = await moveAIUnit(current, attackAfterMove.point, `Red ${unitDefs[current.type].name} moves to interrupt.`);
+        await performAttack(current, attackAfterMove.result);
+        continue;
+      }
+
       const targetProperty = bestPropertyTargetFor(current, reservedCaptureTargets);
 
       if (targetProperty && canReachEventually(current, targetProperty)) {
         reservedCaptureTargets.add(key(targetProperty.x, targetProperty.y));
 
         const moveTarget = bestMoveToward(current, targetProperty, current.hp <= 3);
-        current = await moveAIUnit(current, moveTarget, `Red ${unitDefs[current.type].name} moves toward ${terrainDefs[targetProperty.type].name}.`);
+        current = await moveAIUnit(
+          current,
+          moveTarget,
+          `Red ${unitDefs[current.type].name} moves toward ${propertyTargetReason(targetProperty)}.`
+        );
 
         const landedTile = tileAt(current);
 
-        if (landedTile && isCapturableTerrain(landedTile.type) && landedTile.owner !== "ai") {
+        if (landedTile && shouldCaptureLandedTile(current, landedTile, targetProperty)) {
           const stillCapturing = captureIfPossible(current, simTiles);
           simUnits = simUnits.map(unit => unit.id === current!.id ? { ...unit, acted: true, capturing: stillCapturing } : unit);
-          await sync(`Red ${unitDefs[current.type].name} starts capturing.`, 550);
+          await sync(`Red ${unitDefs[current.type].name} starts capturing ${terrainDefs[landedTile.type].name}.`, 550);
         } else {
-          simUnits = simUnits.map(unit => unit.id === current!.id ? { ...unit, acted: true } : unit);
+          simUnits = simUnits.map(unit => unit.id === current!.id ? { ...unit, acted: true, capturing: false } : unit);
         }
 
         continue;
       }
 
-      const attack = bestCurrentAttack(current);
-      if (attack) {
-        await performAttack(current, attack);
-        continue;
-      }
-
-      simUnits = simUnits.map(unit => unit.id === current!.id ? { ...unit, acted: true } : unit);
+      simUnits = simUnits.map(unit => unit.id === current!.id ? { ...unit, acted: true, capturing: false } : unit);
       continue;
     }
 
